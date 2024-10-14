@@ -1,0 +1,15 @@
+{
+    "DiscordAPIKey": "",
+    "LobbyCodes": ["p51d2509", "pe363d9c", "pf989b30", "p320fba8"],
+    "AdminCodes": [],
+    "EternalServerID": 1031340622692499506,
+    "DevServerID": 0,
+    "LowPrioRoleID": 1194877080182206464,
+    "NotPairedRoleID": 1194877092932878346,
+    "SoloQCommandsID": 1197385106495639592,
+    "SoloQGeneralID": 1194473132631797771,
+    "SoloQDodgersID": 1205779083405828147,
+    "SoloQHostRoleID": 1206776983820963911,
+    "QueueVC": 1205667062786170920,
+    "WaitingRoomVC": 1197381575743127753
+}
