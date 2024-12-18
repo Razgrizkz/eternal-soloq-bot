@@ -5,15 +5,14 @@ import asyncio
 import sys
 import os
 from discord.ext import commands, tasks
-from typing import Literal
+from typing import Literal, Union
 import json
 import logging
 import requests
 
 import sqlite_database as db
-from pois import SP_POIs, WE_POIs, KC_POIs, OL_POIs, ED_POIs, SP_POIs_SHORT, WE_POIs_SHORT, ED_POIs_SHORT
+from pois import Dropships, Dropspots
 from player import Player
-from team import Team
 import utils
 import teams_management
 import ws_r5
@@ -23,37 +22,31 @@ intents = discord.Intents.all()
 client = commands.Bot(command_prefix="$", intents=intents)
 
 logging.basicConfig(level=logging.INFO, format="\033[1m\033[90m%(asctime)s \033[94mLOGGING \033[90m [%(levelname)s] \033[0m %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-# logging.debug('This is a debug message')
-# logging.info('This is an info message')
-# logging.warning('This is a warning message')
-# logging.error('This is an error message')
-# logging.critical('This is a critical message')
 
-DATABASE: db.Database
-EMBED_COLOR = 0x8D00C5
+# Settings
 VARIABLES = json.loads(open("variables.json", encoding="ISO-8859-1").read())
+DATABASE: db.Database
+TEAMS: int = int(VARIABLES["NumofTeams"])
 
+# Constants
+EMBED_COLOR = 0x8D00C5
+ERROR_COLOR = 0xFF0000
+ASYNC_WAITING_TIME: float = 0.1
 CURRENT_GUILD = discord.Object(id=VARIABLES["EternalServerID"])
-DEV_GUILD = discord.Object(id=VARIABLES["DevServerID"])
 
-LOBBY_COUNT = int(open("LobbyCount", encoding="ISO-8859-1").read())
-
+# Global Variables used during the SoloQ states
 QUEUE_VC: discord.VoiceChannel = None
 WAITING_ROOM_VC: discord.VoiceChannel = None
-ASYNC_WAITING_TIME: float = 0.1
-
-LAST_UPDATE: datetime = datetime.now()
 IS_CREATING_QUEUE: bool = False
-CURRENT_HOST = ""
-BALANCER = ""
 OVERSTAT_API_KEY = ""
-
-TEAMS: int = 20
+LOBBY_COUNT = int(VARIABLES["LobbyCount"])
+BALANCER: str = ""
+MAPS: list[str] = []
+MAPS_LIST: dict = {}
+SKIPPERS = set()
 
 @client.event
 async def on_ready():
-
-    global LAST_UPDATE, IS_CREATING_QUEUE
 
     try:
         # Add Cogs (Groups of Commands)
@@ -66,10 +59,6 @@ async def on_ready():
     client.tree.copy_global_to(guild=CURRENT_GUILD)
     await client.tree.sync(guild=CURRENT_GUILD)
 
-    # Sync Commands with Raz's Dev Server
-    client.tree.copy_global_to(guild=DEV_GUILD)
-    await client.tree.sync(guild=DEV_GUILD)
-
     # Create DB file if not exists
     open("eternal.db", "a+").close()
 
@@ -78,340 +67,20 @@ async def on_ready():
     db.create_tables(db.create_connection("eternal.db"))
     DATABASE = db.Database(
         db.Player(db.create_connection("eternal.db")),
-        db.LowPrio(db.create_connection("eternal.db"))
+        db.LowPrio(db.create_connection("eternal.db")),
+        db.Teammates(db.create_connection("eternal.db")),
+        db.Drops(db.create_connection("eternal.db"))
     )
 
     # Download VizBot MMR
-    logging.debug("Downloading MMR...")
-    for player in await utils.download_mmr():
-        if not await DATABASE.players.create(player[0], player[1]):
-            logging.error(f"Failed to Update {player[0]}'s MMR")
-    logging.info("Updated MMR")
+    # logging.debug("Downloading MMR...")
+    # for player in await utils.download_mmr():
+    #     if not await DATABASE.players.create(player[0], player[1]):
+    #         logging.error(f"Failed to Update {player[0]}'s MMR")
+    # logging.info("Updated MMR")
 
     # Log when Bot is Ready
     utils.notify_success(f'We have logged in as {client.user}')
-    return
-
-@client.event
-async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    global LAST_UPDATE, LOBBY_COUNT, IS_CREATING_QUEUE
-
-    # Check if more than 5 seconds have passed since the last update
-    current_time = datetime.now()
-    if ((current_time - LAST_UPDATE) > timedelta(seconds=5)) and (not IS_CREATING_QUEUE):
-
-        # Update last update
-        LAST_UPDATE = current_time
-
-        # Check VC state
-        guild = client.get_guild(CURRENT_GUILD.id)
-
-        if (after.channel is not None) and (QUEUE_VC is not None) and (after.channel.guild.id == CURRENT_GUILD.id) and (after.channel.id == QUEUE_VC.id):
-            if (len(after.channel.members) == TEAMS * 3) and (not IS_CREATING_QUEUE):
-
-                # Lock QUEUE_VC
-                everyone_role = guild.default_role
-                await QUEUE_VC.set_permissions(everyone_role, connect=False)
-
-                # Get VC members list
-                members_list = QUEUE_VC.members
-
-                # Notify Lobby Starting
-                logging.info(f"Lobby {LOBBY_COUNT} Starting")
-                await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(embed=discord.Embed(title=f"Creating Lobby {LOBBY_COUNT}. Starting in ~2 minutes!", color=EMBED_COLOR))
-                await guild.get_channel(VARIABLES["SoloQGeneralID"]).send(embed=discord.Embed(title=f"Creating Lobby {LOBBY_COUNT}. Starting in ~2 minutes!", color=EMBED_COLOR))
-
-                # Prevent Lobby Duplication
-                IS_CREATING_QUEUE = True
-
-                # Assign Dropspots
-                logging.debug("Assigning Dropspots...")
-                drops: list[str] = []
-                short_drops: list[str] = []
-                title: str = ""
-                if LOBBY_COUNT % 4 <= 1:
-                    drops = SP_POIs.copy()
-                    random.shuffle(drops)
-                    short_drops = [SP_POIs_SHORT[poi] for poi in drops]
-                    title = "Storm Point"
-                # elif LOBBY_COUNT % 3 == 1:
-                #     drops = WE_POIs.copy()
-                #     random.shuffle(drops)
-                #     short_drops = [WE_POIs_SHORT[poi] for poi in drops]
-                #     title = "World's Edge"
-                elif LOBBY_COUNT % 4 >= 2:
-                    drops = ED_POIs.copy()
-                    random.shuffle(drops)
-                    short_drops = [ED_POIs_SHORT[poi] for poi in drops]
-                    title = "E-District"
-                logging.debug("Dropspots Assigned")
-                
-                # Get Players List
-                players: list[Player] = []
-                for member in members_list:
-                    # Attempt to Read Player's MMR
-                    res = await DATABASE.players.read(member.id)
-                    if res is not None:
-                        # Save Player
-                        player = Player(member, res[0])
-                    else:
-                        # Assign Role if Not Paired
-                        await member.add_roles(after.channel.guild.get_role(VARIABLES["NotPairedRoleID"]), atomic=True)
-                        logging.info(f"Gave {member.name} NotPaired role.")
-                        player = Player(member, 800)
-                    players.append(player)
-
-                # Create Roles
-                lobby_role = await guild.create_role(name=f"SoloQLobby {LOBBY_COUNT}", mentionable=True)
-                
-                # Create Category and set Permissions
-                lobby_category = await guild.create_category(name=f"Lobby {LOBBY_COUNT}")
-                await lobby_category.set_permissions(lobby_role, view_channel=True, connect=True, speak=True, read_message_history=True, read_messages=True)
-                await lobby_category.set_permissions(everyone_role, view_channel=True, connect=False, speak=True, read_message_history=False, read_messages=False)
-                
-                try:
-                    # Setup SoloQ Host Role
-                    soloqhost_role = guild.get_role(VARIABLES["SoloQHostRoleID"])
-                    await lobby_category.set_permissions(soloqhost_role, view_channel=True, connect=True, speak=True, read_message_history=True, read_messages=True)
-                except Exception as exc:
-                    logging.error(f"Failed to Setup SoloQ Host Role: {str(exc)}")
-
-                # Create Text Channel
-                lobby_channel = await guild.create_text_channel(name=f"soloqlobby-{LOBBY_COUNT}", category=lobby_category)
-
-                # Info people
-                allowed_mentions = discord.AllowedMentions(roles = True)
-                await lobby_channel.send(f"## Creating Lobby, should take a minute or two...")
-                try:
-                    await lobby_channel.send(f"## {soloqhost_role.mention} - Use Lobby Code {(LOBBY_COUNT % len(VARIABLES['LobbyCodes'])) + 1} for this Lobby | `{title}`", allowed_mentions=allowed_mentions)
-                except Exception as exc:
-                    logging.warning(f"Failed to Send Lobby Code: {str(exc)}")
-                    await lobby_channel.send(f"## Use Lobby Code {(LOBBY_COUNT % len(VARIABLES['LobbyCodes'])) + 1} for this Lobby | `{title}`", allowed_mentions=allowed_mentions)
-
-                # Send Dropdown to Setup Lobby
-                try:
-                    await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(embed=discord.Embed(title=f"Setup In-Game Lobby within the next 2 minutes; Select an Apex Client below. (MAKE SURE GAME IS OPEN, NOT IN CUSTOM GAME)!", color=EMBED_COLOR), view=SoloQCog.ApexClientsView(LOBBY_COUNT, short_drops))
-                except Exception as exc:
-                    aux = '\n'.join(short_drops)
-                    await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(f"`{aux}`")
-                    logging.error(f"Failed to Send Dropdown Message: {str(exc)}")
-
-                # Give roles
-                logging.info("Giving Roles...")
-                for player in players:
-                    await player.discord_user.add_roles(lobby_role, atomic=True)
-                    await asyncio.sleep(ASYNC_WAITING_TIME)
-                logging.info("Roles Given")
-
-                # Download VizBot MMR
-                try:
-                    logging.debug("Downloading MMR...")
-                    for player in await utils.download_mmr():
-                        if not await DATABASE.players.create(player[0], player[1]):
-                            logging.error(f"Failed to Update {player[0]}'s MMR")
-                    logging.info("Updated MMR")
-                except Exception as exc:
-                    logging.error(f"Error while trying to update MMR: {str(exc)}")
-
-                # Make Teams
-                logging.debug("Making Teams...")
-                if BALANCER == "Average MMR":
-                    teams, _ = teams_management.balancedTeams(players)
-                elif BALANCER == "Fully Random":
-                    teams, _ = teams_management.unbalancedTeams(players, TEAMS)
-                random.shuffle(teams)
-                logging.debug("Teams Made")
-
-                # Create Channels & Move Players
-                logging.debug("Creating Channels & Moving Players...")
-                e = discord.Embed(title=f"Lobby {LOBBY_COUNT} | {title}", color=EMBED_COLOR)
-                for i in range(TEAMS):
-
-                    # Create VC
-                    team_vc = await guild.create_voice_channel(name=f"T{i + 1} - {teams[i].dropspot}", category=lobby_category, user_limit=3)
-                    await asyncio.sleep(ASYNC_WAITING_TIME)
-
-                    # Assign Player 1
-                    try:
-                        if teams[i].P1 is not None:
-                            await teams[i].P1.discord_user.move_to(team_vc)
-                        else:
-                            logging.error(f"Player 1 is None for Team {i + 1} in Lobby {LOBBY_COUNT}")
-                        await asyncio.sleep(ASYNC_WAITING_TIME)
-                    except Exception as exc1:
-                        logging.warning(str(exc1))
-                        await guild.get_channel(VARIABLES["SoloQDodgersID"]).send(embed=discord.Embed(title=f"Error trying to move user {teams[i].P1.discord_user.name} to {team_vc.name}.", color=EMBED_COLOR))
-
-                    # Assign Player 2
-                    try:
-                        if teams[i].P2 is not None:
-                            await teams[i].P2.discord_user.move_to(team_vc)
-                        else:
-                            logging.error(f"Player 2 is None for Team {i + 1} in Lobby {LOBBY_COUNT}")
-                        await asyncio.sleep(ASYNC_WAITING_TIME)
-                    except Exception as exc2:
-                        logging.warning(str(exc2))
-                        await guild.get_channel(VARIABLES["SoloQDodgersID"]).send(embed=discord.Embed(title=f"Error trying to move user {teams[i].P2.discord_user.name} to {team_vc.name}.", color=EMBED_COLOR))
-
-                    # Assign Player 3
-                    try:
-                        if teams[i].P3 is not None:
-                            await teams[i].P3.discord_user.move_to(team_vc)
-                        else:
-                            logging.error(f"Player 3 is None for Team {i + 1} in Lobby {LOBBY_COUNT}")
-                        await asyncio.sleep(ASYNC_WAITING_TIME)
-                    except Exception as exc3:
-                        logging.warning(str(exc3))
-                        await guild.get_channel(VARIABLES["SoloQDodgersID"]).send(embed=discord.Embed(title=f"Error trying to move user {teams[i].P3.discord_user.name} to {team_vc.name}.", color=EMBED_COLOR))
-
-                    # Add Players to Message
-                    e.add_field(name=f"T{i + 1} - {teams[i].dropspot}", value=f"{teams[i]}")
-
-                    # Add Dropspots
-                    teams[i].dropspot = f"T{i + 1} - {teams[i].dropspot}"
-                
-                # Publish Teams
-                allowed_mentions = discord.AllowedMentions(roles = True)
-                await lobby_channel.send(embed=e)
-                await lobby_channel.send(f"# {lobby_role.mention} - Lobby Code: {VARIABLES['LobbyCodes'][LOBBY_COUNT % len(VARIABLES['LobbyCodes'])]}", allowed_mentions=allowed_mentions)
-                logging.debug("Channels Created")
-
-                await lobby_channel.send("### If you can access this channel, make sure you bind your accounts after your first game in <#1192705204169232384> !!!")
-
-                # Save Dropspots
-                # session = requests.Session()
-                # for i in range(TEAMS):
-                #     utils.overstat_drops(session, i, teams[i].dropspot, match_id, title, "eec")
-                # session.close()
-
-                # Unlock QUEUE_VC
-                await QUEUE_VC.set_permissions(everyone_role, connect=True)
-                #await QUEUE_VC.edit(name="Queue")
-                IS_CREATING_QUEUE = False
-                logging.info("Queue Unlocked")
-
-                # Save Lobby Data
-                # try:
-                #     with open(f"LobbyData/Lobby-{LOBBY_COUNT}-{datetime.now().strftime('%Y-%m-%d-%H')}.csv", "w") as f:
-                #         for team in teams:
-                #             f.write(f"{team.dropspot};{team.P1.discord_user.id};{team.P2.discord_user.id};{team.P3.discord_user.id}\n")
-                # except Exception as exc:
-                #     logging.error(f"Error while trying to save LobbyData: {str(exc)}")
-
-                # Increase LOBBY_COUNT so a new Lobby can start
-                LOBBY_COUNT += 1
-                with open("LobbyCount", "w") as lc:
-                    lc.write(str(LOBBY_COUNT))
-                logging.debug("Lobby Count Increased")
-
-                await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(embed=discord.Embed(title=f"Lobby {LOBBY_COUNT - 1} Setup Completed!", color=EMBED_COLOR))
-                logging.info(f"Lobby {LOBBY_COUNT - 1} Setup Completed!")
-
-                # Just in case
-                await asyncio.sleep(60)
-
-                # Send Messages to the lobby
-                logging.debug(f"Starting Lobby {LOBBY_COUNT - 1} Countdown...")
-                # Send 3-min message
-                try:
-                    websocket_server_url = f"wss://overstat.gg/api/live/read/eternal/{CURRENT_HOST}/{OVERSTAT_API_KEY}"
-                    command_send_message_lobby = {"type": "command",
-                              "cmd": {
-                                  "withAck": True,
-                                  "customMatch_SendChat": {
-                                      "text": "[BOT] STARTING IN 3 MINUTES"
-                                  }
-                        }
-                    }
-                    await ws_r5.send_ws(websocket_server_url, command_send_message_lobby)
-                    logging.info(f"Message '3 min' sent!")
-                    await asyncio.sleep(60)
-                except Exception as exc:
-                    logging.error(str(exc))
-
-                # Send 2-min message
-                try:
-                    websocket_server_url = f"wss://overstat.gg/api/live/read/eternal/{CURRENT_HOST}/{OVERSTAT_API_KEY}"
-                    command_send_message_lobby = {"type": "command",
-                              "cmd": {
-                                  "withAck": True,
-                                  "customMatch_SendChat": {
-                                      "text": "[BOT] STARTING IN 2 MINUTES"
-                                  }
-                        }
-                    }
-                    await ws_r5.send_ws(websocket_server_url, command_send_message_lobby)
-                    logging.info(f"Message '2 min' sent!")
-                    await asyncio.sleep(60)
-                except Exception as exc:
-                    logging.error(str(exc))
-                
-                # Send 1-min message
-                try:
-                    websocket_server_url = f"wss://overstat.gg/api/live/read/eternal/{CURRENT_HOST}/{OVERSTAT_API_KEY}"
-                    command_send_message_lobby = {"type": "command",
-                              "cmd": {
-                                  "withAck": True,
-                                  "customMatch_SendChat": {
-                                      "text": "[BOT] STARTING IN 1 MINUTE"
-                                  }
-                        }
-                    }
-                    await ws_r5.send_ws(websocket_server_url, command_send_message_lobby)
-                    logging.info(f"Message '1 min' sent!")
-                    await asyncio.sleep(60)
-                except Exception as exc:
-                    logging.error(str(exc))
-                
-                # Send starting message and start the lobby
-                try:
-                    websocket_server_url = f"wss://overstat.gg/api/live/read/eternal/{CURRENT_HOST}/{OVERSTAT_API_KEY}"
-                    command_send_message_lobby = {"type": "command",
-                              "cmd": {
-                                  "withAck": True,
-                                  "customMatch_SendChat": {
-                                      "text": "[BOT] STARTING GLHF"
-                                  }
-                        }
-                    }
-                    await asyncio.sleep(10)
-                    await ws_r5.send_ws(websocket_server_url, command_send_message_lobby)
-                    logging.info(f"Message 'starting' sent!")
-                    
-                    command_start_lobby = {"type": "command",
-                        "cmd": {
-                            "withAck": True,
-                            "customMatch_SetMatchmaking": {
-                                "enabled": True
-                            }
-                        }
-                    }
-
-                    await ws_r5.send_ws(websocket_server_url, command_start_lobby)
-                    logging.info(f"In-Game Lobby {LOBBY_COUNT - 1} Started!")
-
-                except Exception as exc:
-                    logging.error(str(exc))
-                
-                # try:
-                #     await asyncio.sleep(3 * 60)
-                #     websocket_server_url = f"wss://overstat.gg/api/live/read/eternal/{CURRENT_HOST}/{OVERSTAT_API_KEY}"
-                #     command_leave_lobby = {"type": "command",
-                #         "cmd": {
-                #             "withAck": True,
-                #             "customMatch_LeaveLobby": {}
-                #         }
-                #     }
-
-                #     await ws_r5.send_ws(websocket_server_url, command_leave_lobby)
-                #     logging.info(f"Left In-Game Lobby {LOBBY_COUNT - 1}!")
-
-                # except Exception as exc:
-                #     logging.error(str(exc))
-
-
-                
-
     return
 
 @tasks.loop(minutes=1)
@@ -431,6 +100,267 @@ async def get_players():
     num_play = len(client.get_guild(CURRENT_GUILD.id)._voice_states)
     await active_players.send(embed=discord.Embed(description=f"Active Players: {num_play}", color=EMBED_COLOR))
     logging.info(f"Active Players - {num_play}")
+    return
+
+@tasks.loop(seconds=5)
+async def lobby_creation():
+    global IS_CREATING_QUEUE, LOBBY_COUNT, VARIABLES, SKIPPERS
+
+    if (not IS_CREATING_QUEUE) and (QUEUE_VC is not None) and (len(set(QUEUE_VC.members) - SKIPPERS) == (TEAMS * 3)):
+
+        # Prevent Lobby Duplication
+        IS_CREATING_QUEUE = True
+
+        # Get VC members list
+        members_list = set(QUEUE_VC.members) - SKIPPERS
+
+        # Get Guild
+        guild = client.get_guild(CURRENT_GUILD.id)
+
+        # Lock QUEUE_VC
+        everyone_role = guild.default_role
+        await QUEUE_VC.set_permissions(everyone_role, connect=False)
+
+        # Notify Lobby Starting
+        logging.info(f"Lobby {LOBBY_COUNT} Starting")
+        await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(embed=discord.Embed(title=f"Creating Lobby {LOBBY_COUNT}. Starting in ~2 minutes!", color=EMBED_COLOR))
+        await guild.get_channel(VARIABLES["SoloQGeneralID"]).send(embed=discord.Embed(title=f"Creating Lobby {LOBBY_COUNT}. Starting in ~2 minutes!", color=EMBED_COLOR))
+
+        # Assign Dropspots
+        logging.debug("Assigning Dropspots...")
+        drops: list[str] = []
+        short_drops: list[str] = []
+        title: str = ""
+
+        if len(MAPS) == 1:
+            drops = MAPS_LIST[MAPS[0]].copy()
+            random.shuffle(drops)
+            short_drops_dict = MAPS_LIST[f"{MAPS[0]}-SHORT"]
+            title = MAPS[0]
+        elif len(MAPS) == 2:
+            if LOBBY_COUNT % 4 <= 1:
+                drops = MAPS_LIST[MAPS[0]].copy()
+                random.shuffle(drops)
+                short_drops_dict = MAPS_LIST[f"{MAPS[0]}-SHORT"]
+                title = MAPS[0]
+            elif LOBBY_COUNT % 4 >= 2:
+                drops = MAPS_LIST[MAPS[1]].copy()
+                random.shuffle(drops)
+                short_drops_dict = MAPS_LIST[f"{MAPS[1]}-SHORT"]
+                title = MAPS[1]
+        elif len(MAPS) == 3:
+            if LOBBY_COUNT % 3 == 1:
+                drops = MAPS_LIST[MAPS[0]].copy()
+                random.shuffle(drops)
+                short_drops_dict = MAPS_LIST[f"{MAPS[0]}-SHORT"]
+                title = MAPS[0]
+            elif LOBBY_COUNT % 3 == 2:
+                drops = MAPS_LIST[MAPS[1]].copy()
+                random.shuffle(drops)
+                short_drops_dict = MAPS_LIST[f"{MAPS[1]}-SHORT"]
+                title = MAPS[1]
+            elif LOBBY_COUNT % 3 == 0:
+                drops = MAPS_LIST[MAPS[2]].copy()
+                random.shuffle(drops)
+                short_drops_dict = MAPS_LIST[f"{MAPS[2]}-SHORT"]
+                title = MAPS[2]
+        elif len(MAPS) == 4:
+            pass
+
+        logging.debug("Dropspots Assigned")
+        
+        # Get Players List
+        players: list[Player] = []
+        for member in members_list:
+            # Attempt to Read Player's MMR
+            res = await DATABASE.players.read(member.id)
+            if res is not None:
+                # Save Player
+                player = Player(member, res[0])
+                DATABASE.drops.create(member.id, [""])
+            else:
+                # Assign Role if Not Paired
+                # await member.add_roles(after.channel.guild.get_role(VARIABLES["NotPairedRoleID"]), atomic=True)
+                # logging.info(f"Gave {member.name} NotPaired role.")
+                player = Player(member, VARIABLES["DefaultMMR"])
+                DATABASE.drops.create(member.id, [""])
+            players.append(player)
+
+        # Make Teams
+        logging.debug("Making Teams...")
+        if BALANCER == "Average MMR":
+            teams, _ = teams_management.balancedTeams(players, drops)
+        elif BALANCER == "Fully Random":
+            teams = teams_management.unbalancedTeams(players, drops)
+        elif BALANCER == "Improved Random":
+            teams = teams_management.improvedUnbalancedTeams(players, drops, DATABASE)
+        random.shuffle(teams)
+        logging.debug(f"Teams Made using - {BALANCER}")
+
+        # Retrieve Drops to get the correct order of teams for the In-Game Lobby Creation
+        short_drops = []
+        for team in teams:
+            short_drops.append(short_drops_dict[team.dropspot])
+
+        # Create Roles
+        lobby_role = await guild.create_role(name=f"SoloQLobby {LOBBY_COUNT}", mentionable=True)
+        
+        # Create Category and set Permissions
+        lobby_category = await guild.create_category(name=f"Lobby {LOBBY_COUNT}")
+        await lobby_category.set_permissions(lobby_role, view_channel=True, connect=True, speak=True, read_message_history=True, read_messages=True)
+        await lobby_category.set_permissions(everyone_role, view_channel=True, connect=False, speak=True, read_message_history=False, read_messages=False)
+
+        try:
+            # Setup SoloQ Host Role
+            soloqhost_role = guild.get_role(VARIABLES["SoloQHostRoleID"])
+            await lobby_category.set_permissions(soloqhost_role, view_channel=True, connect=True, speak=True, read_message_history=True, read_messages=True)
+        except Exception as exc:
+            await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(embed=discord.Embed(title=f"Failed to Setup SoloQ Host Role", description=str(exc), color=0xFF0000))
+            logging.error(f"Failed to Setup SoloQ Host Role: {str(exc)}")
+
+        # Create Text Channel
+        lobby_channel = await guild.create_text_channel(name=f"soloqlobby-{LOBBY_COUNT}", category=lobby_category)
+
+        # Info people
+        allowed_mentions = discord.AllowedMentions(roles = True)
+        await lobby_channel.send(f"## Creating Lobby, should take a minute or two...")
+        try:
+            await lobby_channel.send(f"## {soloqhost_role.mention} - Use Lobby Code {(LOBBY_COUNT % len(VARIABLES['LobbyCodes'])) + 1} for this Lobby | `{title}`", allowed_mentions=allowed_mentions)
+        except Exception as exc:
+            logging.warning(f"Failed to Send Lobby Code: {str(exc)}")
+            await lobby_channel.send(f"## Use Lobby Code {(LOBBY_COUNT % len(VARIABLES['LobbyCodes'])) + 1} for this Lobby | `{title}`", allowed_mentions=allowed_mentions)
+
+        # Send Dropdown to Setup Lobby
+        try:
+            await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(embed=discord.Embed(title=f"Setup In-Game Lobby within the next 2 minutes; Select an Apex Client below. (MAKE SURE GAME IS OPEN, NOT IN CUSTOM GAME)!", color=EMBED_COLOR),
+                                                                       view=SoloQCog.ApexClientsView(LOBBY_COUNT, short_drops))
+        except Exception as exc:
+            await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(embed=discord.Embed(title=f"Failed to Setup In-Game Lobby. Try using the list posted below.", description=str(exc), color=0xFF0000))
+            aux = '\n'.join(short_drops)
+            await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(f"`{aux}`")
+            logging.error(f"Failed to Send Dropdown Message: {str(exc)}")
+        
+        # Send public code before teamlist is published
+        allowed_mentions = discord.AllowedMentions(roles = True)        
+        await lobby_channel.send(f"# {lobby_role.mention} - Lobby Code: `{VARIABLES['LobbyCodes'][LOBBY_COUNT % len(VARIABLES['LobbyCodes'])]}`", allowed_mentions=allowed_mentions)
+
+        # Give roles
+        logging.info("Giving Roles...")
+        for player in players:
+            await player.discord_user.add_roles(lobby_role, atomic=True)
+            await asyncio.sleep(ASYNC_WAITING_TIME)
+        logging.info("Roles Given")
+
+        # Download VizBot MMR
+        # try:
+        #     logging.debug("Downloading MMR...")
+        #     for player in await utils.download_mmr():
+        #         if not await DATABASE.players.create(player[0], player[1]):
+        #             logging.error(f"Failed to Update {player[0]}'s MMR")
+        #     logging.info("Updated MMR")
+        # except Exception as exc:
+        #     await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(embed=discord.Embed(title=f"Error while trying to update MMR", description=str(exc), color=0xFF0000))
+        #     logging.error(f"Error while trying to update MMR: {str(exc)}")
+
+        # Create Channels & Move Players
+        logging.debug("Creating Channels & Moving Players...")
+        e = discord.Embed(title=f"Lobby {LOBBY_COUNT} | {title}", color=EMBED_COLOR)
+        for i in range(TEAMS):
+
+            # Create VC
+            team_vc = await guild.create_voice_channel(name=f"T{i + 1} - {teams[i].dropspot}", category=lobby_category, user_limit=3)
+            #team_vc = await guild.create_voice_channel(name=f"Team {i + 1}", category=lobby_category, user_limit=3)
+            await asyncio.sleep(ASYNC_WAITING_TIME)
+
+            # Assign Player 1
+            try:
+                if teams[i].P1 is not None:
+                    await teams[i].P1.discord_user.move_to(team_vc)
+                else:
+                    logging.error(f"Player 1 is None for Team {i + 1} in Lobby {LOBBY_COUNT}")
+                await asyncio.sleep(ASYNC_WAITING_TIME)
+            except Exception as exc1:
+                logging.warning(str(exc1))
+                await guild.get_channel(VARIABLES["SoloQDodgersID"]).send(embed=discord.Embed(title=f"Error trying to move user {teams[i].P1.discord_user.name} to {team_vc.name}.", color=0xFF0000))
+
+            # Assign Player 2
+            try:
+                if teams[i].P2 is not None:
+                    await teams[i].P2.discord_user.move_to(team_vc)
+                else:
+                    logging.error(f"Player 2 is None for Team {i + 1} in Lobby {LOBBY_COUNT}")
+                await asyncio.sleep(ASYNC_WAITING_TIME)
+            except Exception as exc2:
+                logging.warning(str(exc2))
+                await guild.get_channel(VARIABLES["SoloQDodgersID"]).send(embed=discord.Embed(title=f"Error trying to move user {teams[i].P2.discord_user.name} to {team_vc.name}.", color=0xFF0000))
+
+            # Assign Player 3
+            try:
+                if teams[i].P3 is not None:
+                    await teams[i].P3.discord_user.move_to(team_vc)
+                else:
+                    logging.error(f"Player 3 is None for Team {i + 1} in Lobby {LOBBY_COUNT}")
+                await asyncio.sleep(ASYNC_WAITING_TIME)
+            except Exception as exc3:
+                logging.warning(str(exc3))
+                await guild.get_channel(VARIABLES["SoloQDodgersID"]).send(embed=discord.Embed(title=f"Error trying to move user {teams[i].P3.discord_user.name} to {team_vc.name}.", color=0xFF0000))
+
+            # Add Players to Message
+            e.add_field(name=f"T{i + 1} - {teams[i].dropspot}", value=f"{teams[i]}")
+
+            # Add Dropspots
+            #teams[i].dropspot = f"T{i + 1} - {teams[i].dropspot}"
+
+        # Publish Teams
+        allowed_mentions = discord.AllowedMentions(roles = True)
+        await lobby_channel.send(embed=e)
+        await lobby_channel.send(f"# {lobby_role.mention} - Lobby Code: `{VARIABLES['LobbyCodes'][LOBBY_COUNT % len(VARIABLES['LobbyCodes'])]}`", allowed_mentions=allowed_mentions)
+        logging.debug("Channels Created")
+
+        # Unlock QUEUE_VC
+        await QUEUE_VC.set_permissions(everyone_role, connect=True)
+        IS_CREATING_QUEUE = False
+        logging.info("Queue Unlocked")
+
+        # Increase LOBBY_COUNT so a new Lobby can start
+        VARIABLES["LobbyCount"] = LOBBY_COUNT = LOBBY_COUNT + 1
+        logging.debug("Lobby Count Increased")
+
+        # Save Variables
+        with open("variables.json", "w") as f:
+            json.dump(VARIABLES, f, indent=4, sort_keys=True, separators=(',', ': '))
+
+        # Save/Update players' teammates
+        if BALANCER == "Improved Random":
+            for team in teams:
+                p1 = DATABASE.teammates.read(team.P1.discord_user.id)
+                if p1 == ['']:
+                    p1 = [team.P2.discord_user.id, team.P3.discord_user.id]
+                else:
+                    p1 = [int(x) for x in p1] + [team.P2.discord_user.id, team.P3.discord_user.id]
+                if not DATABASE.teammates.create(team.P1.discord_user.id, p1):
+                    logging.error(f"Failed to update user id {team.P1.discord_user.id}")
+
+                p2 = DATABASE.teammates.read(team.P2.discord_user.id)
+                if p2 == ['']:
+                    p2 = [team.P1.discord_user.id, team.P3.discord_user.id]
+                else:
+                    p2 = [int(x) for x in p2] + [team.P1.discord_user.id, team.P3.discord_user.id]
+                if not DATABASE.teammates.create(team.P2.discord_user.id, p2):
+                    logging.error(f"Failed to update user id {team.P2.discord_user.id}")
+
+                p3 = DATABASE.teammates.read(team.P3.discord_user.id)
+                if p3 == ['']:
+                    p3 = [team.P1.discord_user.id, team.P2.discord_user.id]
+                else:
+                    p3 = [int(x) for x in p3] + [team.P1.discord_user.id, team.P2.discord_user.id]
+                if not DATABASE.teammates.create(team.P3.discord_user.id, p3):
+                    logging.error(f"Failed to update user id {team.P3.discord_user.id}")
+
+        # Send notification that Lobby Setup finished 
+        await guild.get_channel(VARIABLES["SoloQCommandsID"]).send(embed=discord.Embed(title=f"Lobby {LOBBY_COUNT - 1} Setup Completed!", color=EMBED_COLOR))
+        logging.info(f"Lobby {LOBBY_COUNT - 1} Setup Completed!")
+
     return
 
 # -----------------------------------------------------------------------------------------------------------------------------------------
@@ -460,19 +390,16 @@ class SoloQCog(commands.GroupCog, name="soloq"):
         
         @discord.ui.select(placeholder="Select Apex Client", options=utils.clients_to_options())
         async def apexclient_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
-            global CURRENT_HOST
             if select.values[0] not in utils.get_connected_apex_clients():
                 await interaction.response.send_message("Apex Client is not connected.", ephemeral=True)
                 logging.warning(f"Apex Client {select.values[0]} is not connected")
                 return
             try:
-                await interaction.response.edit_message(embed=discord.Embed(title=f"Selected Apex Client for Lobby {self.lobby_number}: {select.values[0]}", color=EMBED_COLOR), view=None)
+                await interaction.response.edit_message(embed=discord.Embed(title=f"Selected Apex Client for Lobby {self.lobby_number}: `{select.values[0]}`", color=EMBED_COLOR), view=None)
             except Exception as exc:
                 logging.warning(f"Most Likely Interaction has already been responded to. {exc}")
-                await interaction.followup.edit_message(interaction.message.id, embed=discord.Embed(title=f"Selected Apex Client for Lobby {self.lobby_number}: {select.values[0]}", color=EMBED_COLOR), view=None)
+                await interaction.followup.edit_message(interaction.message.id, embed=discord.Embed(title=f"Selected Apex Client for Lobby {self.lobby_number}: `{select.values[0]}`", color=EMBED_COLOR), view=None)
             await interaction.followup.send(f"Creating and Setting Up In-Game Lobby {self.lobby_number}. This should take a minute..")
-
-            CURRENT_HOST = select.values[0]
 
             websocket_server_url = f"wss://overstat.gg/api/live/read/eternal/{select.values[0]}/{OVERSTAT_API_KEY}"
 
@@ -501,17 +428,37 @@ class SoloQCog(commands.GroupCog, name="soloq"):
 
 
     @discord.app_commands.command(name="setup-queue", description="Start Queue for Solo Queue.")
-    async def setup_queue(self, interaction: discord.Interaction, balancer: Literal["Average MMR", "Fully Random"]):
+    async def setup_queue(self, interaction: discord.Interaction, balancer: Literal["Average MMR", "Fully Random", "Improved Random"],
+                          maps: Literal["World's Edge", "Storm Point", "E-District", "World's Edge & Storm Point", "World's Edge & E-District", "Storm Point & E-District", "World's Edge, Storm Point & E-District"],
+                          dropships_setting: Literal["Yes", "No"]):
+        logging.debug(f"Setting up Queue {balancer} with maps: {maps}. Dropship Settings: {dropships_setting}.")
 
         # Defer Interaction so Discord doesn't complain
         await interaction.response.defer()
 
         # Save queue and waiting-room
-        global QUEUE_VC, WAITING_ROOM_VC, BALANCER
+        global QUEUE_VC, WAITING_ROOM_VC, BALANCER, MAPS, MAPS_LIST
         BALANCER = balancer
         QUEUE_VC = interaction.guild.get_channel(VARIABLES["QueueVC"])
         WAITING_ROOM_VC = interaction.guild.get_channel(VARIABLES["WaitingRoomVC"])
+        if maps == "World's Edge & Storm Point":
+            MAPS = ["World's Edge", "Storm Point"]
+        elif maps == "World's Edge & E-District":
+            MAPS = ["World's Edge", "E-District"]
+        elif maps == "Storm Point & E-District":
+            MAPS = ["Storm Point", "E-District"]
+        elif maps == "World's Edge, Storm Point & E-District":
+            MAPS = ["World's Edge", "Storm Point", "E-District"]
+        else:
+            MAPS = [maps]
 
+        if dropships_setting == "Yes":
+            MAPS_LIST = {"World's Edge":       Dropships.WE_POIs,       "Storm Point":       Dropships.SP_POIs,       "E-District":       Dropships.ED_POIs,
+                         "World's Edge-SHORT": Dropships.WE_POIs_SHORT, "Storm Point-SHORT": Dropships.SP_POIs_SHORT, "E-District-SHORT": Dropships.ED_POIs_SHORT}
+
+        else:
+            MAPS_LIST = {"World's Edge":       Dropspots.WE_POIs,       "Storm Point":       Dropspots.SP_POIs,       "E-District":       Dropspots.ED_POIs,
+                         "World's Edge-SHORT": Dropspots.WE_POIs_SHORT, "Storm Point-SHORT": Dropspots.SP_POIs_SHORT, "E-District-SHORT": Dropspots.ED_POIs_SHORT}
 
         # Unlock QUEUE_VC
         everyone_role = interaction.guild.default_role
@@ -521,9 +468,13 @@ class SoloQCog(commands.GroupCog, name="soloq"):
         remove_temproles.start()
         get_players.start()
 
+        # Start checking QUEUE_VC for a queue to fill
+        lobby_creation.start()
+
         # Send Status
-        await interaction.followup.send(embed=discord.Embed(title=f"Solo Queue has been Setup: {QUEUE_VC.mention} & {WAITING_ROOM_VC.mention}", color=EMBED_COLOR))
-        logging.info(f"Solo Queue has been Setup: {QUEUE_VC.name} & {WAITING_ROOM_VC.name}")
+        await interaction.followup.send(embed=discord.Embed(title=f"`{balancer}` Solo Queue has been Setup: {QUEUE_VC.mention} & {WAITING_ROOM_VC.mention}.",
+                                                            description=f"- Using Maps: `{maps}`.\n- Dropship Settings: `{dropships_setting}`.\n- Considering `{VARIABLES['NumofTeams']}` Teams (`{int(VARIABLES['NumofTeams']) * 3}` players).", color=EMBED_COLOR))
+        logging.info(f"Solo Queue has been Setup: {QUEUE_VC.name} & {WAITING_ROOM_VC.name}. Using Maps: {maps}.")
 
         return
     
@@ -548,11 +499,28 @@ class SoloQCog(commands.GroupCog, name="soloq"):
             except Exception as exc:
                 logging.error(f"Error while trying to move {player.display_name} to {WAITING_ROOM_VC.name}: {str(exc)}")
 
+        # Stop all tasks
         remove_temproles.stop()
         get_players.stop()
+        lobby_creation.stop()
+
+        # Clear All Databases
+        if not DATABASE.drops.delete_all():
+            logging.error("Failed to Delete Database of Drops.")
+        if not DATABASE.teammates.delete_all():
+            logging.error("Failed to Delete Database of Teammates.")
+
         # Send Status
         await interaction.followup.send(embed=discord.Embed(title="Queue Stopped.", color=EMBED_COLOR))
         logging.info("Queue Stopped")
+
+        # Reset Lobby Count
+        global VARIABLES
+        VARIABLES["LobbyCount"] = 1
+
+        # Save Variables
+        with open("variables.json", "w") as f:
+            json.dump(VARIABLES, f, indent=4, sort_keys=True, separators=(',', ': '))
         return
 
     # Delete Category, Role, Voice Channels and Text Channels.
@@ -577,21 +545,31 @@ class SoloQCog(commands.GroupCog, name="soloq"):
         for vc in category.voice_channels:
             connected_users += len(vc.voice_states)
         
-        if connected_users >= 10:
-            logging.warning("Can't delete lobby: >10 users connected.")
+        if connected_users >= 15:
+            logging.warning("Can't delete lobby: >15 users connected.")
             await interaction.followup.send(embed=discord.Embed(title="Cannot delete current queue while a game is happening."))
             return
 
         # Delete Role
-        role = discord.utils.get(interaction.guild.roles, name=f"SoloQ{category.name}")
-        await role.delete()
+        try:
+            role = discord.utils.get(interaction.guild.roles, name=f"SoloQ{category.name}")
+            await role.delete()
+        except Exception as exc:
+            logging.error(str(exc))
 
         # Delete Channels
-        for channel in category.channels:
-            await channel.delete()
-        await category.delete()
+        try:
+            for channel in category.channels:
+                await channel.delete()
+            await category.delete()
+        except Exception as exc:
+            logging.error(str(exc))
 
-        await interaction.followup.send(embed=discord.Embed(title=f"{deleted_lobby} Deleted.", color=EMBED_COLOR))
+        # Send Status
+        try:
+            await interaction.followup.send(embed=discord.Embed(title=f"{deleted_lobby} Deleted.", color=EMBED_COLOR))
+        except Exception as exc:
+            logging.error(f"Command used inside deleted channel :( - {exc}")
         logging.info(f"{deleted_lobby} Deleted.")
         return
     
@@ -630,7 +608,16 @@ class SoloQCog(commands.GroupCog, name="soloq"):
         logging.info("In-Game Lobby Created")
         return
 
-    
+    # Delete Previous Records
+    @discord.app_commands.command(name="clear-previous-drops", description="Delete Previous Records of POIs that prevent repetition.")
+    async def clear_previous_drops(self, interaction: discord.Interaction):
+        logging.debug("/clear-previous-drops")
+        if DATABASE.drops.delete_all():
+            await interaction.response.send_message("Succesfully cleared drops!.")
+        else:
+            await interaction.response.send_message("Failed to clear drops!.")
+        return
+
     # Get Active Users in Voice Channels in the server.
     @discord.app_commands.command(name="active-players", description="Get Active Users in Voice Channels in the server.")
     async def active_players(self, interaction: discord.Interaction):
@@ -671,11 +658,72 @@ class SoloQCog(commands.GroupCog, name="soloq"):
             await member.remove_roles(role)
             logging.info(f"Removed {member.display_name}'s Low Priority Role")
 
+    # Add Users to be skipped from the Queue.
+    @discord.app_commands.command(name="add-immune", description="Add Users to be skipped from the Queue.")
+    async def add_immune(self, interaction: discord.Interaction, member1: discord.Member, member2: Union[discord.Member, None], member3: Union[discord.Member, None]):
+        logging.info(f"Adding Immune to Queue: {member1}, {member2}, {member3}")
+
+        global SKIPPERS
+
+        aux = ""
+        SKIPPERS.add(member1)
+        aux += f"{member1.mention} - "
+        if member2 is not None:
+            SKIPPERS.add(member2)
+            aux += f"{member2.mention} - "
+        if member3 is not None:
+            SKIPPERS.add(member3)
+            aux += f"{member3.mention} - "
+        
+        await interaction.response.send_message(embed=discord.Embed(description=f"Added Members: {aux}", color=EMBED_COLOR))
+        return
+    
+    # Remove Users to be skipped from the Queue.
+    @discord.app_commands.command(name="remove-immune", description="Remove Users to be skipped from the Queue.")
+    async def remove_immune(self, interaction: discord.Interaction, member1: discord.Member, member2: Union[discord.Member, None], member3: Union[discord.Member, None]):
+        logging.info(f"Removing Immune to Queue: {member1}, {member2}, {member3}")
+
+        global SKIPPERS
+
+        aux = ""
+        try:
+            SKIPPERS.remove(member1)
+            aux += f"{member1.mention} - "
+        except Exception as exc:
+            logging.error(f"Member1 not in Immune List. {exc}")
+        if member2 is not None:
+            try:
+                SKIPPERS.remove(member2)
+                aux += f"{member2.mention} - "
+            except Exception as exc:
+                logging.error(f"Member2 not in Immune List. {exc}")
+        if member3 is not None:
+            try:
+                SKIPPERS.remove(member3)
+                aux += f"{member3.mention} - "
+            except Exception as exc:
+                logging.error(f"Member3 not in Immune List. {exc}")
+        
+        await interaction.response.send_message(embed=discord.Embed(description=f"Removed Members: {aux}", color=EMBED_COLOR))
+        return
+    
+    # Users to be skipped from the Queue.
+    @discord.app_commands.command(name="check-immune", description="Displays Users to be skipped from the Queue.")
+    async def check_immune(self, interaction: discord.Interaction):
+        logging.info(f"Display Skipped Users")
+
+        global SKIPPERS
+        if len(SKIPPERS) == 0:
+            aux = "None"
+        else:
+            aux = "\n".join([x.mention for x in SKIPPERS])
+        await interaction.response.send_message(embed=discord.Embed(title="Users to be skipped from the Queue.", description=aux, color=EMBED_COLOR))
+        return
 
 # -----------------------------------------------------------------------------------------------------------------------------------------
     
 # Get User MMR.
-@client.tree.command(name="get-user-mmr", description="Get User MMR.", guilds=[CURRENT_GUILD, DEV_GUILD])
+@client.tree.command(name="get-user-mmr", description="Get User MMR.", guilds=[CURRENT_GUILD])
 async def get_user(interaction: discord.Interaction, user: discord.Member):
     utils.notify_command(f"Get {user.name}'s MMR")
 
@@ -691,7 +739,7 @@ async def get_user(interaction: discord.Interaction, user: discord.Member):
     return
 
 #
-@client.tree.command(name="restart-bot", description="Restart Bot.", guilds=[CURRENT_GUILD, DEV_GUILD])
+@client.tree.command(name="restart-bot", description="Restart Bot.", guilds=[CURRENT_GUILD])
 async def restart_bot(interaction: discord.Interaction):
     utils.notify_command("Restart Bot")
     await interaction.response.send_message(embed=discord.Embed(description="Restarting Bot...", color=EMBED_COLOR))
@@ -699,7 +747,7 @@ async def restart_bot(interaction: discord.Interaction):
 
 #
 
-@client.tree.command(name="test", description="Test Command", guilds=[CURRENT_GUILD, DEV_GUILD])
+@client.tree.command(name="test", description="Test Command", guilds=[CURRENT_GUILD])
 async def test(interaction: discord.Interaction):
 
     

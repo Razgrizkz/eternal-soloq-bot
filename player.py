@@ -5,13 +5,15 @@ class Player:
     def __init__(self, user: Union[discord.Member, None], mmr: float = 800) -> None:
         self.discord_user = user
         self.MMR = mmr
+        self.previous_teammates: list[Player] = []
+        self.previous_POIs: list[str] = []
         return
     
     def __str__(self) -> str:
         if self.discord_user is None:
             return "<None>"
         else:
-            return f"<@{self.discord_user.id}> - {int(self.MMR)}"
+            return f"<@{self.discord_user.id}>"
         
     def debug(self) -> str:
         if self.discord_user is None:
@@ -33,7 +35,6 @@ class Player:
             return False
         else:
             return self.discord_user.id == other.discord_user.id
-
 
 class Test:
     def __init__(self, id: int) -> None:

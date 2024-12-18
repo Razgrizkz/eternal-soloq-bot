@@ -37,7 +37,6 @@ def notify_error(message: str):
 
 # -------------------------------------------------------------------------------------------------------------------------------------------
 
-
 # def overstat_drops(session: requests.Session, team_n: int, POIs: list[str], match_id: int, map_string: str, password: str):
 #     # Add Teams to Overstat
 #     url = "https://overstat.gg/api/drop"

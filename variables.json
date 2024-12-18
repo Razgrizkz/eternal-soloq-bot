@@ -1,15 +1,22 @@
 {
     "DiscordAPIKey": "",
-    "LobbyCodes": ["p51d2509", "pe363d9c", "pf989b30", "p320fba8"],
     "AdminCodes": [],
+    "DefaultMMR": 800,
     "EternalServerID": 1031340622692499506,
-    "DevServerID": 0,
+    "LobbyCodes": [
+        "pec08983",
+        "pd0f5973",
+        "p9745b84",
+        "p6d88b45"
+    ],
+    "LobbyCount": 1,
     "LowPrioRoleID": 1194877080182206464,
     "NotPairedRoleID": 1194877092932878346,
-    "SoloQCommandsID": 1197385106495639592,
-    "SoloQGeneralID": 1194473132631797771,
-    "SoloQDodgersID": 1205779083405828147,
-    "SoloQHostRoleID": 1206776983820963911,
+    "NumofTeams": 20,
     "QueueVC": 1205667062786170920,
+    "SoloQCommandsID": 1197385106495639592,
+    "SoloQDodgersID": 1205779083405828147,
+    "SoloQGeneralID": 1194473132631797771,
+    "SoloQHostRoleID": 1206776983820963911,
     "WaitingRoomVC": 1197381575743127753
 }
